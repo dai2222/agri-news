@@ -8,6 +8,8 @@ Google News RSS から農業関連記事を取得し、docs/index.html を生成
 import feedparser
 import re
 import json
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from html import unescape
 from pathlib import Path
@@ -55,6 +57,29 @@ FLAGS = [
 # ============================================================
 # 関数
 # ============================================================
+
+def fetch_og_image(url):
+    """リンク先ページの og:image を取得する。失敗したら None を返す"""
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AgriNewsBot/1.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            # ヘッダ部分だけ取得すれば十分なので先頭 60KB のみ読む
+            html = resp.read(61440).decode("utf-8", errors="ignore")
+        # property="og:image" content="..." と content="..." property="og:image" の両パターンに対応
+        match = re.search(
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            html
+        ) or re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            html
+        )
+        return match.group(1).strip() if match else None
+    except Exception:
+        return None
+
 
 def detect_flags(text):
     """テキストからフラグを自動判定して返す"""
@@ -133,6 +158,21 @@ def fetch_articles():
     # 日付の新しい順でソート
     articles.sort(key=lambda x: x["date_iso"], reverse=True)
     print(f"  合計 {len(articles)} 件取得（重複排除済み）")
+
+    # og:image をリンク先ページから並列取得（最大10並列、失敗時はRSSサムネをそのまま使用）
+    print("  og:image を並列取得中...")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_idx = {
+            executor.submit(fetch_og_image, a["link"]): i
+            for i, a in enumerate(articles)
+        }
+        for future in as_completed(future_to_idx):
+            i = future_to_idx[future]
+            og = future.result()
+            if og:
+                articles[i]["thumbnail"] = og
+    print("  og:image 取得完了")
+
     return articles
 
 
@@ -229,6 +269,8 @@ header h1 {{ font-size: 1.35rem; font-weight: 700; letter-spacing: 0.02em; }}
   display: flex;
   flex-direction: column;
   transition: box-shadow 0.15s, transform 0.15s;
+  text-decoration: none;
+  color: inherit;
 }}
 .card:hover {{ box-shadow: 0 6px 20px rgba(0,0,0,.09); transform: translateY(-2px); }}
 .thumb {{
@@ -258,13 +300,12 @@ header h1 {{ font-size: 1.35rem; font-weight: 700; letter-spacing: 0.02em; }}
   font-weight: 600;
   line-height: 1.45;
   color: var(--text);
-  text-decoration: none;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }}
-.card-title:hover {{ color: var(--accent); text-decoration: underline; }}
+.card:hover .card-title {{ color: var(--accent); }}
 .card-meta {{
   font-size: 0.75rem;
   color: var(--sub);
@@ -333,17 +374,17 @@ function renderCards(filter) {{
       : '';
 
     return `
-<div class="card">
+<a class="card" href="${{a.link}}" target="_blank" rel="noopener noreferrer">
   ${{thumb}}
   <div class="card-body">
     <div class="flags">${{flagsHtml}}</div>
-    <a class="card-title" href="${{a.link}}" target="_blank" rel="noopener noreferrer">${{a.title}}</a>
+    <div class="card-title">${{a.title}}</div>
     <div class="card-meta">
       <span>${{a.source}}</span>
       <span>${{a.date}}</span>
     </div>
   </div>
-</div>`;
+</a>`;
   }}).join('');
 }}
 
