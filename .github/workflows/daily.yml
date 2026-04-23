@@ -38,6 +38,8 @@ jobs:
             exit 0
           fi
           git commit -m "🌾 農業ニュース自動更新 $(TZ=Asia/Tokyo date +'%Y-%m-%d')"
+          # ローカルの変更と衝突しないよう最新を取り込んでからプッシュ
+          git pull --rebase origin main
           # 一時的な通信エラーに備えてリトライ（最大3回）
           for i in 1 2 3; do
             git push origin main && break
