@@ -8,8 +8,6 @@ Google News RSS から農業関連記事を取得し、docs/index.html を生成
 import feedparser
 import re
 import json
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from html import unescape
 from pathlib import Path
@@ -58,29 +56,6 @@ FLAGS = [
 # 関数
 # ============================================================
 
-def fetch_og_image(url):
-    """リンク先ページの og:image を取得する。失敗したら None を返す"""
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AgriNewsBot/1.0)"}
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            # ヘッダ部分だけ取得すれば十分なので先頭 60KB のみ読む
-            html = resp.read(61440).decode("utf-8", errors="ignore")
-        # property="og:image" content="..." と content="..." property="og:image" の両パターンに対応
-        match = re.search(
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-            html
-        ) or re.search(
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-            html
-        )
-        return match.group(1).strip() if match else None
-    except Exception:
-        return None
-
-
 def detect_flags(text):
     """テキストからフラグを自動判定して返す"""
     detected = []
@@ -92,27 +67,7 @@ def detect_flags(text):
     return detected
 
 
-def extract_thumbnail(entry):
-    """RSSエントリからサムネイルURLを取得する（複数パターンに対応）"""
-    # パターン1: media:content
-    if hasattr(entry, "media_content") and entry.media_content:
-        for m in entry.media_content:
-            if "url" in m:
-                return m["url"]
-    # パターン2: enclosure（添付ファイル）
-    if hasattr(entry, "enclosures") and entry.enclosures:
-        for e in entry.enclosures:
-            if e.get("type", "").startswith("image"):
-                return e.get("href") or e.get("url")
-    # パターン3: description内の <img> タグを抽出
-    desc = getattr(entry, "description", "") or getattr(entry, "summary", "") or ""
-    img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', desc)
-    if img_match:
-        return img_match.group(1)
-    return None
-
-
-def parse_date(entry) -> datetime:
+def parse_date(entry):
     """エントリの公開日を datetime (JST) で返す"""
     if hasattr(entry, "published_parsed") and entry.published_parsed:
         return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).astimezone(JST)
@@ -139,7 +94,6 @@ def fetch_articles():
             title = unescape(entry.get("title", "タイトルなし"))
             source = entry.get("source", {}).get("title", "") or feed.feed.get("title", "")
             pub_date = parse_date(entry)
-            thumbnail = extract_thumbnail(entry)
 
             # フラグ判定はタイトル＋概要テキストで行う
             summary = unescape(re.sub(r"<[^>]+>", "", entry.get("summary", "") or ""))
@@ -151,28 +105,12 @@ def fetch_articles():
                 "source": source,
                 "date": pub_date.strftime("%Y-%m-%d %H:%M"),
                 "date_iso": pub_date.isoformat(),
-                "thumbnail": thumbnail,
                 "flags": flags,
             })
 
     # 日付の新しい順でソート
     articles.sort(key=lambda x: x["date_iso"], reverse=True)
     print(f"  合計 {len(articles)} 件取得（重複排除済み）")
-
-    # og:image をリンク先ページから並列取得（最大10並列、失敗時はRSSサムネをそのまま使用）
-    print("  og:image を並列取得中...")
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_idx = {
-            executor.submit(fetch_og_image, a["link"]): i
-            for i, a in enumerate(articles)
-        }
-        for future in as_completed(future_to_idx):
-            i = future_to_idx[future]
-            og = future.result()
-            if og:
-                articles[i]["thumbnail"] = og
-    print("  og:image 取得完了")
-
     return articles
 
 
@@ -273,27 +211,42 @@ header h1 {{ font-size: 1.35rem; font-weight: 700; letter-spacing: 0.02em; }}
   color: inherit;
 }}
 .card:hover {{ box-shadow: 0 6px 20px rgba(0,0,0,.09); transform: translateY(-2px); }}
-.thumb {{
+.card-banner {{
   width: 100%;
-  height: 155px;
-  background: #e2ece4;
+  height: 90px;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 2.2rem;
-  overflow: hidden;
+  align-items: flex-end;
+  padding: 10px 14px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+  position: relative;
+  overflow: hidden;
 }}
-.thumb img {{ width: 100%; height: 155px; object-fit: cover; display: block; }}
+.card-banner::after {{
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.18);
+}}
 .card-body {{ padding: 13px; flex: 1; display: flex; flex-direction: column; gap: 7px; }}
-.flags {{ display: flex; flex-wrap: wrap; gap: 4px; min-height: 20px; }}
 .flag {{
   font-size: 0.68rem;
-  padding: 2px 8px;
+  padding: 2px 9px;
   border-radius: 12px;
   color: #fff;
   font-weight: 700;
   letter-spacing: 0.03em;
+  position: relative;
+  z-index: 1;
+  background: rgba(255,255,255,0.22);
+  border: 1px solid rgba(255,255,255,0.5);
+}}
+.no-flag-icon {{
+  position: relative;
+  z-index: 1;
+  font-size: 2rem;
+  line-height: 1;
 }}
 .card-title {{
   font-size: 0.92rem;
@@ -362,22 +315,24 @@ function renderCards(filter) {{
   }}
 
   grid.innerHTML = list.map(a => {{
-    const thumb = a.thumbnail
-      ? `<div class="thumb"><img src="${{a.thumbnail}}" alt="" loading="lazy"
-           onerror="this.parentElement.innerHTML='🌾'"></div>`
-      : `<div class="thumb">🌾</div>`;
+    // バナー背景色：フラグが複数あれば最初の2色でグラデーション、なければアクセント色
+    let bannerBg;
+    if (a.flags.length >= 2) {{
+      bannerBg = `linear-gradient(135deg, ${{a.flags[0].color}} 0%, ${{a.flags[1].color}} 100%)`;
+    }} else if (a.flags.length === 1) {{
+      bannerBg = `linear-gradient(135deg, ${{a.flags[0].color}} 0%, ${{a.flags[0].color}}99 100%)`;
+    }} else {{
+      bannerBg = 'linear-gradient(135deg, #3d7a4f 0%, #5a9e6f 100%)';
+    }}
 
     const flagsHtml = a.flags.length
-      ? a.flags.map(f =>
-          `<span class="flag" style="background:${{f.color}}">${{f.name}}</span>`
-        ).join('')
-      : '';
+      ? a.flags.map(f => `<span class="flag">${{f.name}}</span>`).join('')
+      : '<span class="no-flag-icon">🌾</span>';
 
     return `
 <a class="card" href="${{a.link}}" target="_blank" rel="noopener noreferrer">
-  ${{thumb}}
+  <div class="card-banner" style="background:${{bannerBg}}">${{flagsHtml}}</div>
   <div class="card-body">
-    <div class="flags">${{flagsHtml}}</div>
     <div class="card-title">${{a.title}}</div>
     <div class="card-meta">
       <span>${{a.source}}</span>
