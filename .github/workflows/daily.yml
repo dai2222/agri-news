@@ -23,10 +23,18 @@ jobs:
           python-version: '3.11'
 
       - name: 依存ライブラリをインストール
-        run: pip install feedparser
+        run: pip install -r requirements.txt
 
       - name: ニュース取得 & HTML 生成
         run: python scripts/fetch_news.py
+
+      - name: 投稿下書きを生成してNotionに保存
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+        run: python scripts/generate_post.py
 
       - name: 変更をコミット & プッシュ
         run: |
@@ -38,9 +46,7 @@ jobs:
             exit 0
           fi
           git commit -m "🌾 農業ニュース自動更新 $(TZ=Asia/Tokyo date +'%Y-%m-%d')"
-          # ローカルの変更と衝突しないよう最新を取り込んでからプッシュ
           git pull --rebase origin main
-          # 一時的な通信エラーに備えてリトライ（最大3回）
           for i in 1 2 3; do
             git push origin main && break
             echo "プッシュ失敗 (${i}/3)。5秒後に再試行..."
